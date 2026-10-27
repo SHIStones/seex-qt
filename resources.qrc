@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/seex">
+        <file alias="pcblib_template.txt">src/altium/pcblib_library_data_template.txt</file>
+        <file alias="libpkg_document_keys.txt">src/altium/libpkg_document_keys.txt</file>
+    </qresource>
+</RCC>

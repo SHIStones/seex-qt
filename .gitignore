@@ -1,0 +1,23 @@
+# Build output
+build/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Qt / Visual Studio
+*.user
+*.user.*
+.vs/
+CMakeSettings.json
+
+# Export scratch
+testout/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
