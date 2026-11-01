@@ -427,6 +427,11 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
 
     auto *page = new QWebEnginePage(m_profile, m_view);
     m_view->setPage(page);
+    // The browser paints its own background before the page draws anything, and
+    // the default is white: the empty preview card turned white for a moment
+    // before the panes appeared. Matching the card colour makes that phase
+    // invisible.
+    page->setBackgroundColor(theme::surface());
     page->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
     // The 3D pane is a WebGL viewer; both of these are on by default, but they
     // are stated here so a build that ships different defaults still works.
