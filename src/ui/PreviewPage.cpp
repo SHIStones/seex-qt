@@ -42,6 +42,8 @@ const char *kPreviewScript = R"JS(
   let rowRef = null;
   let lastWidth = 0;
   let lastHeight = 0;
+  // The row's layout size the current scale was computed from.
+  let lastNatural = { width: 0, height: 0 };
 
   // The raw product page - and the half-built datasheet dialog on top of it -
   // is not something the user should ever see. The document stays invisible
@@ -84,24 +86,26 @@ const char *kPreviewScript = R"JS(
   // and scales the finished result, so a resize costs nothing and the panes
   // stay correct at any window size. The Rust build scales its row the same
   // way.
-  const measureNatural = () => {
-    rowRef.style.transform = 'none';
-    const rect = rowRef.getBoundingClientRect();
-    return {
-      width: rect.width || 660,
-      height: rect.height || 300
-    };
-  };
+  //
+  // The layout size is read from offsetWidth/offsetHeight: a transform does not
+  // change them, so measuring costs nothing. Reading a bounding rect after
+  // clearing the transform would force the whole page through style recalc and
+  // layout on every resize tick.
+  const measureNatural = () => ({
+    width: rowRef.offsetWidth || 660,
+    height: rowRef.offsetHeight || 300
+  });
 
   const applyScale = () => {
     if (!rowRef) return;
     const size = measureNatural();
-    const scale = Math.min(
+    const scale = Math.max(0.05, Math.min(
       (window.innerWidth - 48) / size.width,
       (window.innerHeight - 48) / size.height
-    );
+    ));
     rowRef.style.transformOrigin = 'center center';
     rowRef.style.transform = `scale(${scale})`;
+    lastNatural = size;
     lastWidth = window.innerWidth;
     lastHeight = window.innerHeight;
   };
@@ -262,7 +266,14 @@ const char *kPreviewScript = R"JS(
       return;
     }
     hideEverything(dialog, rowRef);
-    if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight) {
+    // Re-measuring is not only about the window size: the panes grow when their
+    // SVG and 3D content arrives, which changes the row's own size long after
+    // the last resize. Without this the scale stays matched to a row that is no
+    // longer there, and the clipping is permanent - the same self-healing the
+    // old layout check gave.
+    const size = measureNatural();
+    if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight ||
+        size.width !== lastNatural.width || size.height !== lastNatural.height) {
       applyScale();
     }
   };
@@ -410,9 +421,16 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // Parented to this page so the page (and the profile below) outlive it, but
     // flagged as a tool window: frameless, out of the taskbar, never activated
     // by being shown, and always above the window that owns it.
+    //
+    // It also never takes focus. The panes are there to be clicked and dragged,
+    // and a browser window that activates on click would grey out the main
+    // window's title bar and swallow its shortcuts every time - the mouse still
+    // reaches the page without it.
     m_view = new QWebEngineView(this);
-    m_view->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    m_view->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint
+                           | Qt::WindowDoesNotAcceptFocus);
     m_view->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_view->setFocusPolicy(Qt::NoFocus);
     m_view->hide();
 
     // A named profile keeps the HTTP cache, cookies and local storage on disk.
@@ -522,11 +540,18 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // another tab, so the first visit to Preview shows a finished preview
     // instead of paying for the browser start-up there. Nothing is visible
     // until the page reports itself drawn.
+    //
+    // Deferred by one turn on purpose: this page has no real size until the
+    // window has been laid out, and a browser created before that arranges the
+    // preview for a viewport that never comes back.
     const QString lastId = m_window->state().latestImported();
     if (lastId.isEmpty()) {
         showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
     } else {
-        loadId(lastId);
+        QTimer::singleShot(0, this, [this, lastId] {
+            if (m_currentId.isEmpty())
+                loadId(lastId);
+        });
     }
 }
 
@@ -555,7 +580,10 @@ void PreviewPage::placeView()
     if (!m_card || !m_view)
         return;
     const QSize size = m_card->size();
-    if (size.isEmpty())
+    // A page that has never been laid out still reports its 100x30 default, and
+    // a browser created at that size would arrange the preview for a viewport
+    // that never comes back. Nothing real is ever this small.
+    if (size.width() < 320 || size.height() < 200)
         return;
 
     // The window is always shown, only moved out of sight while there is
@@ -569,14 +597,11 @@ void PreviewPage::placeView()
     const QRect target(origin, size);
     if (m_view->geometry() != target)
         m_view->setGeometry(target);
+    // No raise(): an owned tool window already sits above the window that owns
+    // it, and raising it would lift it above whatever application the user
+    // switched to. Showing it once is all that is needed.
     if (!m_view->isVisible())
         m_view->show();
-    // Raised only on the way in: this runs ten times a second, and a window
-    // operation per tick for no reason is exactly what makes a browser window
-    // cost more than it should.
-    if (onScreen && !m_onScreen)
-        m_view->raise();
-    m_onScreen = onScreen;
 }
 
 void PreviewPage::activate()

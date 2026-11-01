@@ -75,8 +75,6 @@ private:
     bool m_ready = false;
     /// The Preview tab is the one on screen.
     bool m_active = false;
-    /// The browser window is currently on the card rather than parked.
-    bool m_onScreen = false;
     /// The navigation itself failed, so retrying needs a real reload.
     bool m_navigationFailed = false;
 };
