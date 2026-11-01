@@ -157,6 +157,13 @@ void MainWindow::applyPage(int index)
     if (index < 0 || index >= m_navButtons.size())
         return;
 
+    // The preview owns a window of its own, so it has to be told when the tab
+    // it belongs to is no longer the one on screen.
+    if (m_stack->currentIndex() == static_cast<int>(Page::Preview) && m_previewPage
+        && index != static_cast<int>(Page::Preview)) {
+        m_previewPage->deactivate();
+    }
+
     m_stack->setCurrentIndex(index);
     for (int i = 0; i < m_navButtons.size(); ++i) {
         m_navButtons.at(i)->setProperty("active", i == index);

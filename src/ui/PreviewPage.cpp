@@ -6,6 +6,7 @@
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"
 
+#include <QEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QGridLayout>
@@ -13,7 +14,6 @@
 #include <QPainter>
 #include <QLabel>
 #include <QPushButton>
-#include <QResizeEvent>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -32,8 +32,8 @@ namespace {
 
 /// Runs inside the product page: finds the datasheet dialog, hides everything
 /// else, and lays the three preview columns out across the whole window. Sets
-/// `window.__seexReady` once the panes are in place, which is what ends the
-/// "正在加载" state.
+/// `window.__seexReady` once the panes are drawn, which is what makes the host
+/// show the browser window.
 const char *kPreviewScript = R"JS(
 (() => {
   if (window.__seexPreviewInstalled) return;
@@ -45,9 +45,16 @@ const char *kPreviewScript = R"JS(
 
   // The raw product page - and the half-built datasheet dialog on top of it -
   // is not something the user should ever see. The document stays invisible
-  // until the panes have actually drawn, so a reload only ever shows the
-  // finished result.
+  // until the panes have actually drawn, and the host only shows the browser
+  // window after that, so neither a load nor a reload can show a half-built
+  // page.
   document.documentElement.style.opacity = '0';
+
+  const notifyReady = () => {
+    if (readyPosted) return;
+    readyPosted = true;
+    window.__seexReady = true;
+  };
 
   const revealWhenDrawn = (row) => {
     const started = Date.now();
@@ -59,6 +66,7 @@ const char *kPreviewScript = R"JS(
     const tick = () => {
       if (drawn() || Date.now() - started > 3000) {
         document.documentElement.style.opacity = '';
+        notifyReady();
         return;
       }
       setTimeout(tick, 100);
@@ -66,45 +74,36 @@ const char *kPreviewScript = R"JS(
     setTimeout(tick, 200);
   };
 
-  const notifyReady = () => {
-    if (readyPosted) return;
-    readyPosted = true;
-    setTimeout(() => { window.__seexReady = true; }, 350);
+  // Fit the row to the window without touching its layout.
+  //
+  // A transform is deliberate. The panes are drawn by the page's own viewers,
+  // and they fit themselves once, for the box they were created in; anything
+  // that changes those boxes - `zoom`, or rearranging the row - leaves them
+  // drawing for a size their box no longer has, which is why a window resize
+  // used to need a full reload. A transform keeps every box exactly as it is
+  // and scales the finished result, so a resize costs nothing and the panes
+  // stay correct at any window size. The Rust build scales its row the same
+  // way.
+  const measureNatural = () => {
+    rowRef.style.transform = 'none';
+    const rect = rowRef.getBoundingClientRect();
+    return {
+      width: rect.width || 660,
+      height: rect.height || 300
+    };
   };
 
-  // Fill the window, but fit: measure the row at its own size first, then
-  // scale by the smaller of the two ratios so nothing is ever clipped.
-  //
-  // `zoom` rather than `transform: scale()`. Both were tried: the panes are
-  // drawn by the page's own viewers, and they read their boxes back, so either
-  // kind of scaling leaves them drawing for a size their box no longer has -
-  // cropped, blank, or unreachable by the mouse. The page only gets them right
-  // when it is arranged again at the size that will be on screen, which is what
-  // the resize handler does; with that, `zoom` gives the panes a real layout
-  // size and the viewers stay consistent with it.
   const applyScale = () => {
     if (!rowRef) return;
-    rowRef.style.zoom = '1';
-    const naturalWidth = rowRef.getBoundingClientRect().width || 660;
-    const naturalHeight = rowRef.getBoundingClientRect().height || 300;
+    const size = measureNatural();
     const scale = Math.min(
-      (window.innerWidth - 48) / naturalWidth,
-      (window.innerHeight - 48) / naturalHeight
+      (window.innerWidth - 48) / size.width,
+      (window.innerHeight - 48) / size.height
     );
-    rowRef.style.zoom = String(scale);
+    rowRef.style.transformOrigin = 'center center';
+    rowRef.style.transform = `scale(${scale})`;
     lastWidth = window.innerWidth;
     lastHeight = window.innerHeight;
-  };
-
-  // The panes size themselves from their own content, so the natural size the
-  // scale was measured from is not stable: right after a resize the page has
-  // not re-laid out yet and the measurement comes back too small, which leaves
-  // the row wider than the window. Re-measuring while the result does not fit
-  // is what keeps the columns inside the card.
-  const fits = () => {
-    if (!rowRef) return true;
-    const rect = rowRef.getBoundingClientRect();
-    return rect.width <= window.innerWidth + 1 && rect.height <= window.innerHeight + 1;
   };
 
   // Everything the page shows besides the three panes. Idempotent on purpose:
@@ -167,7 +166,6 @@ const char *kPreviewScript = R"JS(
     dialog.style.zIndex = '2147483647';
     dialog.style.transform = 'none';
 
-    // Fill the window, but fit: the ratio is measured and applied by applyScale.
     rowRef = row;
     applyScale();
 
@@ -191,11 +189,10 @@ const char *kPreviewScript = R"JS(
     }
 
     dialog.dataset.seexStyled = '1';
-    notifyReady();
     revealWhenDrawn(row);
     // The panes grow once their SVG and 3D content arrive, which changes the
     // natural size the scale was measured from. Re-measuring after the first
-    // paint keeps the columns from staying clipped.
+    // paint keeps the columns filling the window.
     setTimeout(applyScale, 400);
     setTimeout(applyScale, 1500);
     return true;
@@ -221,7 +218,8 @@ const char *kPreviewScript = R"JS(
   };
 
   // The scale is tied to the window size, so the panes follow a resize of the
-  // host window. Registered once; applyScale does nothing until rowRef is set.
+  // browser window. Registered once; applyScale does nothing until rowRef is
+  // set.
   window.addEventListener('resize', () => {
     applyScale();
     setTimeout(applyScale, 200);
@@ -264,8 +262,7 @@ const char *kPreviewScript = R"JS(
       return;
     }
     hideEverything(dialog, rowRef);
-    if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight ||
-        !fits()) {
+    if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight) {
       applyScale();
     }
   };
@@ -292,7 +289,11 @@ const char *kPreviewScript = R"JS(
 constexpr int kPollIntervalMs = 250;
 constexpr int kPollLimit = 120; // 30 seconds
 constexpr int kResolveTimeoutMs = 45000; // the lookup retries three times inside the client
-constexpr int kResizeReloadMs = 600; // wait for the window to stop changing size
+constexpr int kFollowIntervalMs = 100; // how often the browser window chases the card
+
+/// Where the browser window waits while the page is still arranging itself:
+/// far outside any real desktop, but still a shown window. See placeView().
+const QPoint kParkedPoint(-30000, -30000);
 
 } // namespace
 
@@ -322,8 +323,7 @@ protected:
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::TextAntialiasing);
-        // Opaque: the browser stays visible underneath so it keeps receiving
-        // the synthetic clicks, and this page covers it while loading.
+        // Opaque: it covers the card while there is nothing to show in it.
         painter.fillRect(rect(), QColor(246, 248, 250));
 
         const QRect area = rect().adjusted(24, 24, -24, -24);
@@ -389,30 +389,38 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     header->addWidget(m_refresh);
     outer->addLayout(header);
 
-    auto *card = new QWidget(this);
-    card->setObjectName(QStringLiteral("Card"));
-    card->setAttribute(Qt::WA_StyledBackground, true);
-    // A grid, not a box: both children sit in the same cell, so whichever one
-    // is visible fills the card and the hidden one takes no space at all.
-    auto *cardLayout = new QGridLayout(card);
+    m_card = new QWidget(this);
+    m_card->setObjectName(QStringLiteral("Card"));
+    m_card->setAttribute(Qt::WA_StyledBackground, true);
+    // A grid, not a box: the notice sits in the card on its own, and the
+    // browser covers the very same area from its own window.
+    auto *cardLayout = new QGridLayout(m_card);
     cardLayout->setContentsMargins(0, 0, 0, 0);
     cardLayout->setSpacing(0);
 
-    // The browser and the notice share the card and are shown one at a time.
-    // QWebEngineView is a native child window, so anything stacked on top of it
-    // would be painted over; hiding it is the only reliable switch.
-    m_view = new QWebEngineView(card);
-    // Experimental switch: build the browser's native window up front instead
-    // of on its first show. Run with SEEX_PREVIEW_NATIVE=1 to compare.
-    if (qEnvironmentVariableIsSet("SEEX_PREVIEW_NATIVE"))
-        m_view->setAttribute(Qt::WA_NativeWindow);
+    m_notice = new NoticeView(m_card);
+    cardLayout->addWidget(m_notice, 0, 0);
+    outer->addWidget(m_card, 1);
+
+    // The browser is its own window from the start. Keeping it inside the card
+    // made every repaint of the page a repaint of the whole main window, which
+    // is what a tab switch or a resize showed as the window flashing; the Rust
+    // build hosts WebView2 the same way and for the same reason.
+    //
+    // Parented to this page so the page (and the profile below) outlive it, but
+    // flagged as a tool window: frameless, out of the taskbar, never activated
+    // by being shown, and always above the window that owns it.
+    m_view = new QWebEngineView(this);
+    m_view->setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+    m_view->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_view->hide();
 
     // A named profile keeps the HTTP cache, cookies and local storage on disk.
     // The default profile is off-the-record, so every navigation downloaded the
     // whole product page again - the SPA bundles, the datasheet SVG and the 3D
     // model all came over the network on each id change or refresh.
     //
-    // Created after the card on purpose: QObject deletes its children in
+    // Created after the view on purpose: QObject deletes its children in
     // creation order, so the view (and the page inside it) goes away before the
     // profile - a page must never outlive the profile it belongs to.
     m_profile = new QWebEngineProfile(QStringLiteral("seex-preview"), this);
@@ -445,8 +453,7 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     //
     // A second, tiny script runs before the document is parsed. That is the only
     // point early enough to hide the page: at document-ready the browser has
-    // already painted the raw product page, and that paint is what shows through
-    // for a frame on every reload - and a window resize reloads on purpose.
+    // already painted the raw product page.
     QWebEngineScript hideScript;
     hideScript.setName(QStringLiteral("seex-preview-hide"));
     hideScript.setSourceCode(QStringLiteral(
@@ -463,12 +470,6 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     script.setWorldId(QWebEngineScript::MainWorld);
     script.setRunsOnSubFrames(false);
     page->scripts().insert(script);
-
-    m_notice = new NoticeView(card);
-
-    cardLayout->addWidget(m_view, 0, 0);
-    cardLayout->addWidget(m_notice, 0, 0);
-    outer->addWidget(card, 1);
 
     m_poll = new QTimer(this);
     m_poll->setInterval(kPollIntervalMs);
@@ -489,19 +490,14 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
                    QStringLiteral("解析产品页超时"));
     });
 
-    m_resizeReload = new QTimer(this);
-    m_resizeReload->setSingleShot(true);
-    connect(m_resizeReload, &QTimer::timeout, this, [this] {
-        // The page's viewers fit themselves once, for the size the window has
-        // when they are created, and never again. Arranging the page again at
-        // the new size is the only thing that gives them the right boxes, so it
-        // is done without the loading notice: the panes take a moment to come
-        // back, but nothing is asked of the user.
-        if (!m_ready || m_currentId.isEmpty())
-            return;
-        loadId(m_currentId);
-    });
-
+    // The browser window has to sit on the card even while the window is being
+    // dragged, and a drag produces no event on the card itself.
+    m_follow = new QTimer(this);
+    m_follow->setInterval(kFollowIntervalMs);
+    connect(m_follow, &QTimer::timeout, this, &PreviewPage::placeView);
+    m_follow->start();
+    m_window->installEventFilter(this);
+    placeView();
 
     connect(m_view, &QWebEngineView::loadFinished, this, [this](bool ok) {
         if (!ok) {
@@ -522,45 +518,88 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
         }
     });
 
-    showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
+    // Warm the browser and the last imported page while the user is still on
+    // another tab, so the first visit to Preview shows a finished preview
+    // instead of paying for the browser start-up there. Nothing is visible
+    // until the page reports itself drawn.
+    const QString lastId = m_window->state().latestImported();
+    if (lastId.isEmpty()) {
+        showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
+    } else {
+        loadId(lastId);
+    }
 }
 
-void PreviewPage::resizeEvent(QResizeEvent *event)
+bool PreviewPage::eventFilter(QObject *watched, QEvent *event)
 {
-    QWidget::resizeEvent(event);
-    // The first resizes arrive while the constructor is still building the page.
-    if (!m_resizeReload)
-        return;
-    if (!isVisible()) {
-        // Nothing to rearrange while the tab is hidden; activate() picks it up.
-        m_sizeDirty = true;
-        return;
+    if (watched == m_window) {
+        switch (event->type()) {
+        case QEvent::Move:
+        case QEvent::Resize:
+            placeView();
+            break;
+        case QEvent::WindowStateChange:
+        case QEvent::Show:
+        case QEvent::Hide:
+            placeView();
+            break;
+        default:
+            break;
+        }
     }
-    m_resizeReload->start(kResizeReloadMs);
+    return QWidget::eventFilter(watched, event);
+}
+
+void PreviewPage::placeView()
+{
+    if (!m_card || !m_view)
+        return;
+    const QSize size = m_card->size();
+    if (size.isEmpty())
+        return;
+
+    // The window is always shown, only moved out of sight while there is
+    // nothing to show. Hiding it instead is not an option: a widget that is not
+    // shown never receives its size, so the page would lay out in a 0x0
+    // viewport, the panes would never get boxes and the preview would never be
+    // reported as ready - the page would wait for itself.
+    const bool onScreen = m_ready && m_active && m_window->isVisible()
+        && !m_window->isMinimized();
+    const QPoint origin = onScreen ? m_card->mapToGlobal(QPoint(0, 0)) : kParkedPoint;
+    const QRect target(origin, size);
+    if (m_view->geometry() != target)
+        m_view->setGeometry(target);
+    if (!m_view->isVisible())
+        m_view->show();
+    if (onScreen)
+        m_view->raise();
 }
 
 void PreviewPage::activate()
 {
+    m_active = true;
     const QString id = m_window->state().latestImported();
     if (id.isEmpty()) {
         ++m_requestToken;
         m_loading = false;
+        m_ready = false;
         m_poll->stop();
         m_resolve->stop();
         m_title->clear();
+        placeView();
         showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
-        return;
-    }
-    if (m_sizeDirty) {
-        m_sizeDirty = false;
-        loadId(id);
         return;
     }
     if (id != m_currentId) {
         loadId(id);
         return;
     }
-    if (m_ready || m_loading)
+    if (m_ready) {
+        m_notice->hide();
+        placeView();
+        return;
+    }
+    if (m_loading)
         return;
     // Same product page, still loaded: only the dialog never arranged itself.
     // Re-arranging it in place costs one script call, while navigating again
@@ -570,6 +609,12 @@ void PreviewPage::activate()
         loadId(id);
     else
         retryInPage();
+}
+
+void PreviewPage::deactivate()
+{
+    m_active = false;
+    placeView();
 }
 
 void PreviewPage::reload()
@@ -593,11 +638,11 @@ void PreviewPage::loadId(const QString &id)
     // load and could clear m_loading while this one is still resolving.
     m_poll->stop();
     m_resolve->stop();
-    // Nothing is announced while the page arranges itself: the browser keeps the
-    // page invisible until the panes are drawn, so the only thing the user ever
-    // sees is the finished preview. A "正在加载" notice here would just flash
-    // over the card on the way in.
+    // The browser window stays hidden until the page reports its panes drawn,
+    // so the card is empty - the card colour, not the raw page - while the load
+    // runs, and the finished preview is what appears.
     m_ready = false;
+    placeView();
     m_notice->hide();
 
     if (const QString cached = m_urlCache.value(id); !cached.isEmpty()) {
@@ -652,6 +697,7 @@ void PreviewPage::retryInPage()
     m_loading = true;
     m_pollTicks = 0;
     m_ready = false;
+    placeView();
     m_notice->hide();
     m_view->page()->runJavaScript(
         QStringLiteral("window.__seexPreviewRetry && window.__seexPreviewRetry()"));
@@ -675,34 +721,21 @@ void PreviewPage::pollReady()
                                       m_loading = false;
                                       m_poll->stop();
                                       m_ready = true;
-                                      // The notice is what hides the browser while it
-                                      // loads; dropping it in the same turn as this
-                                      // poll answer uncovers whatever frame the
-                                      // compositor happens to hold, which on the
-                                      // first open is still empty - that is the
-                                      // flash. Give it one more turn first.
-                                      QTimer::singleShot(120, this, [this] {
-                                          if (m_ready)
-                                              m_notice->hide();
-                                      });
+                                      // The page reports itself ready only once
+                                      // its panes are drawn, so the window can
+                                      // appear with the finished preview in it.
+                                      m_notice->hide();
+                                      placeView();
                                   });
 }
 
 void PreviewPage::showNotice(const QString &title, const QColor &color, const QString &detail)
 {
     m_ready = false;
+    placeView();
     m_notice->show();
     m_notice->raise();
     m_notice->setNotice(title, color, detail);
 }
 
 } // namespace seex
-
-
-
-
-
-
-
-
-
