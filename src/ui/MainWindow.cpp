@@ -77,6 +77,22 @@ MainWindow::MainWindow(QWidget *parent)
         m_state.importText(seed);
         applyPage(static_cast<int>(Page::Preview));
         refreshCounts();
+    } else if (!qEnvironmentVariableIsSet("SEEX_PREVIEW_NOWARMUP")) {
+        // The embedded browser changes the window's surface to OpenGL the first
+        // time it paints, and Qt answers that by recreating the window - which
+        // reads as the whole window blinking when the Preview tab is opened for
+        // the first time. Pay for that first paint now, while the window is
+        // still coming up: the tab is shown for a single turn behind its notice
+        // and switched straight back.
+        QTimer::singleShot(0, this, [this] {
+            const int previous = m_stack->currentIndex();
+            if (previous == static_cast<int>(Page::Preview))
+                return;
+            m_stack->setCurrentIndex(static_cast<int>(Page::Preview));
+            QTimer::singleShot(30, this, [this, previous] {
+                m_stack->setCurrentIndex(previous);
+            });
+        });
     }
 }
 

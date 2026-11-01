@@ -402,6 +402,10 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // QWebEngineView is a native child window, so anything stacked on top of it
     // would be painted over; hiding it is the only reliable switch.
     m_view = new QWebEngineView(card);
+    // Experimental switch: build the browser's native window up front instead
+    // of on its first show. Run with SEEX_PREVIEW_NATIVE=1 to compare.
+    if (qEnvironmentVariableIsSet("SEEX_PREVIEW_NATIVE"))
+        m_view->setAttribute(Qt::WA_NativeWindow);
 
     // A named profile keeps the HTTP cache, cookies and local storage on disk.
     // The default profile is off-the-record, so every navigation downloaded the
