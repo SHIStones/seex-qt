@@ -44,6 +44,11 @@ const char *kPreviewScript = R"JS(
   let lastHeight = 0;
   // The row's layout size the current scale was computed from.
   let lastNatural = { width: 0, height: 0 };
+  // The framing each pane's drawing was fitted to when it was first drawn.
+  let paneFrames = [];
+  // Until this moment a resize is still being settled, and the framing below is
+  // re-asserted on every tick.
+  let framesHoldUntil = 0;
 
   // The raw product page - and the half-built datasheet dialog on top of it -
   // is not something the user should ever see. The document stays invisible
@@ -58,6 +63,58 @@ const char *kPreviewScript = R"JS(
     window.__seexReady = true;
   };
 
+  // Remember the framing each pane's drawing was fitted to the first time it
+  // was drawn.
+  //
+  // The page fits the drawing exactly once. On a window resize it recomputes
+  // the framing from scratch and gets it wrong - the viewBox becomes the
+  // drawing's whole bounding box, so the pad pane turns into a black rectangle
+  // and the symbol pane shows a corner of the symbol. Putting the remembered
+  // framing back costs nothing and needs no reload: only the drawing's pixel
+  // size has to follow the pane, and the page does get that right.
+  const rememberFrames = () => {
+    if (!rowRef) return;
+    paneFrames = Array.from(rowRef.children).map((pane) => {
+      const svg = pane.querySelector('svg');
+      return svg ? svg.getAttribute('viewBox') : null;
+    });
+  };
+
+  const restoreFrames = () => {
+    if (!rowRef || paneFrames.length === 0) return;
+    Array.from(rowRef.children).forEach((pane, index) => {
+      const frame = paneFrames[index];
+      const svg = pane.querySelector('svg');
+      if (!svg || !frame) return;
+
+      // The remembered framing is only usable while the drawing still lives in
+      // the same coordinates. When it does not - the page redraws the symbol
+      // from scratch at some sizes - the framing is recomputed from the drawing
+      // itself instead of being left wrong.
+      let box = null;
+      try {
+        box = svg.getBBox();
+      } catch (error) {
+        box = null;
+      }
+      const numbers = frame.split(/[\s,]+/).map(Number);
+      const usable = !box || box.width <= 0 || box.height <= 0 ||
+        (box.x < numbers[0] + numbers[2] && box.x + box.width > numbers[0] &&
+         box.y < numbers[1] + numbers[3] && box.y + box.height > numbers[1]);
+      if (!usable) {
+        const size = Math.max(box.width, box.height) * 1.15;
+        const centerX = box.x + box.width / 2;
+        const centerY = box.y + box.height / 2;
+        svg.setAttribute('viewBox',
+          `${centerX - size / 2} ${centerY - size / 2} ${size} ${size}`);
+        return;
+      }
+      if (svg.getAttribute('viewBox') !== frame) {
+        svg.setAttribute('viewBox', frame);
+      }
+    });
+  };
+
   const revealWhenDrawn = (row) => {
     const started = Date.now();
     const drawn = () => Array.from(row.children).every((pane) =>
@@ -67,6 +124,7 @@ const char *kPreviewScript = R"JS(
       }));
     const tick = () => {
       if (drawn() || Date.now() - started > 3000) {
+        rememberFrames();
         document.documentElement.style.opacity = '';
         notifyReady();
         return;
@@ -227,6 +285,10 @@ const char *kPreviewScript = R"JS(
   window.addEventListener('resize', () => {
     applyScale();
     setTimeout(applyScale, 200);
+    // The page re-fits its drawings asynchronously after the resize, so the
+    // remembered framing is held for a moment rather than written once.
+    framesHoldUntil = Date.now() + 2500;
+    restoreFrames();
   });
 
   let attempts = 0;
@@ -275,6 +337,9 @@ const char *kPreviewScript = R"JS(
     if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight ||
         size.width !== lastNatural.width || size.height !== lastNatural.height) {
       applyScale();
+    }
+    if (Date.now() < framesHoldUntil) {
+      restoreFrames();
     }
   };
 
