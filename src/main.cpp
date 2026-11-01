@@ -64,6 +64,14 @@ int main(int argc, char *argv[])
     // The rest is for the 3D pane: occlusion detection treats a WebView nested
     // in another window as hidden and throttles it, which shows up as a stutter
     // when orbiting or zooming, and the GPU flags keep it off the blocklist.
+    //
+    // Two flags that used to be here are gone on purpose. Scaling never obeyed
+    // `--force-device-scale-factor`: QtWebEngine reports Qt's own device pixel
+    // ratio as the screen's scale factor, so the 150% surface stayed 1620x1350
+    // and the flag only added a mismatched scale factor. `--disable-gpu-vsync`
+    // removed the frame pacing a QQuickWidget-hosted page needs - the browser
+    // paints through the GUI thread, so uncapped frames queue up behind the
+    // widget repaint and the drag looks worse, not better.
     {
         const QByteArray existing = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
         QByteArray flags = existing;
@@ -73,15 +81,6 @@ int main(int argc, char *argv[])
             "--ignore-gpu-blocklist",
             "--enable-gpu-rasterization",
             "--enable-zero-copy",
-            // Windows runs this display at 150%, so Chromium was rendering a
-            // 1620x1350 surface for a 1080x900 window - 2.25x the pixels for a
-            // WebGL canvas that has to keep up with the mouse. One device pixel
-            // per CSS pixel is what the preview needs; the panes are scaled to
-            // fill the window anyway.
-            "--force-device-scale-factor=1",
-            // The 3D viewer draws every frame; letting it run without vsync
-            // keeps the drag from being pinned to a missed frame.
-            "--disable-gpu-vsync",
         };
         for (const QByteArray &flag : wanted) {
             if (flags.contains(flag))
