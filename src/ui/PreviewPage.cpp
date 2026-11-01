@@ -13,13 +13,18 @@
 #include <QPainter>
 #include <QLabel>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWebEnginePage>
 #include <QWebEngineSettings>
 #include <QWebEngineProfile>
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
 #include <QWebEngineView>
+
+#include <memory>
 
 namespace seex {
 
@@ -34,6 +39,32 @@ const char *kPreviewScript = R"JS(
   if (window.__seexPreviewInstalled) return;
   window.__seexPreviewInstalled = true;
   let readyPosted = false;
+  let rowRef = null;
+  let lastWidth = 0;
+  let lastHeight = 0;
+
+  // The raw product page - and the half-built datasheet dialog on top of it -
+  // is not something the user should ever see. The document stays invisible
+  // until the panes have actually drawn, so a reload only ever shows the
+  // finished result.
+  document.documentElement.style.opacity = '0';
+
+  const revealWhenDrawn = (row) => {
+    const started = Date.now();
+    const drawn = () => Array.from(row.children).every((pane) =>
+      Array.from(pane.querySelectorAll('canvas, svg')).some((element) => {
+        const box = element.getBoundingClientRect();
+        return box.width > 150 && box.height > 150;
+      }));
+    const tick = () => {
+      if (drawn() || Date.now() - started > 3000) {
+        document.documentElement.style.opacity = '';
+        return;
+      }
+      setTimeout(tick, 100);
+    };
+    setTimeout(tick, 200);
+  };
 
   const notifyReady = () => {
     if (readyPosted) return;
@@ -41,16 +72,45 @@ const char *kPreviewScript = R"JS(
     setTimeout(() => { window.__seexReady = true; }, 350);
   };
 
-  const styleDialog = (dialog, container) => {
-    if (dialog.dataset.seexStyled === '1') return true;
+  // Fill the window, but fit: measure the row at its own size first, then
+  // scale by the smaller of the two ratios so nothing is ever clipped.
+  //
+  // `zoom` rather than `transform: scale()`. Both were tried: the panes are
+  // drawn by the page's own viewers, and they read their boxes back, so either
+  // kind of scaling leaves them drawing for a size their box no longer has -
+  // cropped, blank, or unreachable by the mouse. The page only gets them right
+  // when it is arranged again at the size that will be on screen, which is what
+  // the resize handler does; with that, `zoom` gives the panes a real layout
+  // size and the viewers stay consistent with it.
+  const applyScale = () => {
+    if (!rowRef) return;
+    rowRef.style.zoom = '1';
+    const naturalWidth = rowRef.getBoundingClientRect().width || 660;
+    const naturalHeight = rowRef.getBoundingClientRect().height || 300;
+    const scale = Math.min(
+      (window.innerWidth - 48) / naturalWidth,
+      (window.innerHeight - 48) / naturalHeight
+    );
+    rowRef.style.zoom = String(scale);
+    lastWidth = window.innerWidth;
+    lastHeight = window.innerHeight;
+  };
 
-    // The three panes live inside the dialog's row, but neither the nesting
-    // depth nor the exact ancestor is fixed: start at the container and walk up
-    // to the dialog's own child.
-    let row = container;
-    while (row.parentElement && row.parentElement !== dialog) row = row.parentElement;
-    if (!row || row === dialog) return false;
+  // The panes size themselves from their own content, so the natural size the
+  // scale was measured from is not stable: right after a resize the page has
+  // not re-laid out yet and the measurement comes back too small, which leaves
+  // the row wider than the window. Re-measuring while the result does not fit
+  // is what keeps the columns inside the card.
+  const fits = () => {
+    if (!rowRef) return true;
+    const rect = rowRef.getBoundingClientRect();
+    return rect.width <= window.innerWidth + 1 && rect.height <= window.innerHeight + 1;
+  };
 
+  // Everything the page shows besides the three panes. Idempotent on purpose:
+  // assigning a value a node already has does not invalidate layout, so this
+  // can be re-asserted when the page puts its own content back.
+  const hideEverything = (dialog, row) => {
     document.documentElement.style.overflow = 'hidden';
     document.body.style.overflow = 'hidden';
     document.body.style.background = '#ffffff';
@@ -60,6 +120,24 @@ const char *kPreviewScript = R"JS(
     for (const child of Array.from(dialog.children)) {
       child.style.display = child === row ? 'flex' : 'none';
     }
+  };
+
+  const styleDialog = (dialog, container) => {
+    if (dialog.dataset.seexStyled === '1') return true;
+
+    // The three panes live inside the dialog's row, but neither the nesting
+    // depth nor the exact ancestor is fixed: start at the container and walk up
+    // to the dialog's own child.
+    //
+    // The walk only terminates inside the dialog when the container really is
+    // one of its descendants; otherwise it climbs to <html>, the hiding below
+    // blanks the page and the panes never appear.
+    if (!dialog.contains(container)) return false;
+    let row = container;
+    while (row.parentElement && row.parentElement !== dialog) row = row.parentElement;
+    if (!row || row === dialog) return false;
+
+    hideEverything(dialog, row);
 
     row.style.margin = '0';
     row.style.width = 'auto';
@@ -89,23 +167,9 @@ const char *kPreviewScript = R"JS(
     dialog.style.zIndex = '2147483647';
     dialog.style.transform = 'none';
 
-    // Fill the window, but fit: measure the row at its own size first, then
-    // scale by the smaller of the two ratios so nothing is ever clipped.
-    //
-    // `zoom` rather than `transform: scale()` on purpose. A transform turns the
-    // row into a scaled compositing layer, and Chromium re-rasterises that layer
-    // every frame when it contains a WebGL canvas - which is what made dragging
-    // the 3D view stutter. `zoom` gives the panes a real size instead, so the
-    // canvas keeps its own resolution and only its drawing buffer changes.
-    row.style.transform = 'none';
-    row.style.zoom = '1';
-    const naturalWidth = row.getBoundingClientRect().width || 660;
-    const naturalHeight = row.getBoundingClientRect().height || 300;
-    const scale = Math.min(
-      (window.innerWidth - 48) / naturalWidth,
-      (window.innerHeight - 48) / naturalHeight
-    );
-    row.style.zoom = String(scale);
+    // Fill the window, but fit: the ratio is measured and applied by applyScale.
+    rowRef = row;
+    applyScale();
 
     if (dialog.dataset.seexShield !== '1') {
       dialog.dataset.seexShield = '1';
@@ -128,6 +192,12 @@ const char *kPreviewScript = R"JS(
 
     dialog.dataset.seexStyled = '1';
     notifyReady();
+    revealWhenDrawn(row);
+    // The panes grow once their SVG and 3D content arrive, which changes the
+    // natural size the scale was measured from. Re-measuring after the first
+    // paint keeps the columns from staying clipped.
+    setTimeout(applyScale, 400);
+    setTimeout(applyScale, 1500);
     return true;
   };
 
@@ -150,15 +220,19 @@ const char *kPreviewScript = R"JS(
     element.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
   };
 
+  // The scale is tied to the window size, so the panes follow a resize of the
+  // host window. Registered once; applyScale does nothing until rowRef is set.
+  window.addEventListener('resize', () => {
+    applyScale();
+    setTimeout(applyScale, 200);
+  });
+
   let attempts = 0;
   let lastPress = 0;
   const install = () => {
     const dialog = document.querySelector('[role="dialog"]');
     const container = document.querySelector('#containerId');
-    if (dialog && container) {
-      styleDialog(dialog, container);
-      return true;
-    }
+    if (dialog && container) return styleDialog(dialog, container);
     const now = Date.now();
     if (attempts >= 4 || now - lastPress < 1500) return false;
     const button =
@@ -174,19 +248,51 @@ const char *kPreviewScript = R"JS(
     return false;
   };
 
-  // Stop polling the moment the panes are in place: a 300ms tick that keeps
-  // touching the DOM is what made the 3D view slow to drag.
-  if (!install()) {
-    const timer = setInterval(() => {
-      if (install()) clearInterval(timer);
-    }, 300);
-  }
+  // A tick that keeps touching the DOM is what made the 3D view slow to drag,
+  // so this one only redoes work that actually changed: it installs again when
+  // the dialog or the arranged row is gone, re-asserts the hiding when the page
+  // puts its own content back, and re-measures only when the window changed
+  // size. The Rust build got the same self-healing from re-running its 300ms
+  // install tick; this keeps the effect without the DOM churn.
+  const ensure = () => {
+    if (document.hidden) return;
+    const dialog = document.querySelector('[role="dialog"]');
+    const container = document.querySelector('#containerId');
+    if (!dialog || !container || !rowRef || !rowRef.isConnected ||
+        dialog.dataset.seexStyled !== '1') {
+      install();
+      return;
+    }
+    hideEverything(dialog, rowRef);
+    if (window.innerWidth !== lastWidth || window.innerHeight !== lastHeight ||
+        !fits()) {
+      applyScale();
+    }
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) ensure();
+  });
+
+  // Exposed for the host: when the tab is revisited while the page is loaded
+  // but the panes never appeared, one more attempt is much cheaper than a
+  // navigation. The press counters are reset so the sequence may run again.
+  window.__seexPreviewRetry = () => {
+    attempts = 0;
+    lastPress = 0;
+    return install();
+  };
+
+  install();
+  setInterval(ensure, 500);
 })();
 )JS";
 
 
 constexpr int kPollIntervalMs = 250;
 constexpr int kPollLimit = 120; // 30 seconds
+constexpr int kResolveTimeoutMs = 45000; // the lookup retries three times inside the client
+constexpr int kResizeReloadMs = 600; // wait for the window to stop changing size
 
 } // namespace
 
@@ -296,19 +402,44 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // QWebEngineView is a native child window, so anything stacked on top of it
     // would be painted over; hiding it is the only reliable switch.
     m_view = new QWebEngineView(card);
-    m_view->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
-    // The 3D pane is a WebGL viewer; both of these are on by default, but they
-    // are stated here so a build that ships different defaults still works.
+
+    // A named profile keeps the HTTP cache, cookies and local storage on disk.
+    // The default profile is off-the-record, so every navigation downloaded the
+    // whole product page again - the SPA bundles, the datasheet SVG and the 3D
+    // model all came over the network on each id change or refresh.
+    //
+    // Created after the card on purpose: QObject deletes its children in
+    // creation order, so the view (and the page inside it) goes away before the
+    // profile - a page must never outlive the profile it belongs to.
+    m_profile = new QWebEngineProfile(QStringLiteral("seex-preview"), this);
+    m_profile->setPersistentCookiesPolicy(QWebEngineProfile::AllowPersistentCookies);
     // The default UA advertises QtWebEngine, and the product page gates its 3D
     // viewer on the browser string: with the stock UA the pane only ever shows
     // the "for reference only" placeholder. Presenting as Edge gets the real
     // viewer, which is what the Rust build (WebView2) was talking to.
-    m_view->page()->profile()->setHttpUserAgent(
+    m_profile->setHttpUserAgent(
         QStringLiteral("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"));
-    m_view->settings()->setAttribute(QWebEngineSettings::WebGLEnabled, true);
-    m_view->settings()->setAttribute(QWebEngineSettings::Accelerated2dCanvasEnabled, true);
+
+    auto *page = new QWebEnginePage(m_profile, m_view);
+    m_view->setPage(page);
+    page->settings()->setAttribute(QWebEngineSettings::LocalContentCanAccessRemoteUrls, true);
+    // The 3D pane is a WebGL viewer; both of these are on by default, but they
+    // are stated here so a build that ships different defaults still works.
+    page->settings()->setAttribute(QWebEngineSettings::WebGLEnabled, true);
+    page->settings()->setAttribute(QWebEngineSettings::Accelerated2dCanvasEnabled, true);
     m_view->setContextMenuPolicy(Qt::NoContextMenu);
+
+    // The script has to run in the page's own world, on every frame that loads.
+    // Inserted once, not per load: the collection appends whatever it is given,
+    // so inserting it again on each refresh stacked another copy of the script.
+    QWebEngineScript script;
+    script.setName(QStringLiteral("seex-preview"));
+    script.setSourceCode(QString::fromUtf8(kPreviewScript));
+    script.setInjectionPoint(QWebEngineScript::DocumentReady);
+    script.setWorldId(QWebEngineScript::MainWorld);
+    script.setRunsOnSubFrames(false);
+    page->scripts().insert(script);
 
     m_notice = new NoticeView(card);
 
@@ -320,31 +451,104 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     m_poll->setInterval(kPollIntervalMs);
     connect(m_poll, &QTimer::timeout, this, &PreviewPage::pollReady);
 
+    m_resolve = new QTimer(this);
+    m_resolve->setSingleShot(true);
+    connect(m_resolve, &QTimer::timeout, this, [this] {
+        if (!m_loading)
+            return;
+        // Abandon the lookup. Bumping the token drops the answer whenever it
+        // turns up, and the page is left in the retry state instead of sitting
+        // on "正在加载" for as long as the client keeps retrying.
+        ++m_requestToken;
+        m_loading = false;
+        m_navigationFailed = true;
+        showNotice(QStringLiteral("检索失败"), theme::danger(),
+                   QStringLiteral("解析产品页超时"));
+    });
+
+    m_resizeReload = new QTimer(this);
+    m_resizeReload->setSingleShot(true);
+    connect(m_resizeReload, &QTimer::timeout, this, [this] {
+        // The page's viewers fit themselves once, for the size the window has
+        // when they are created, and never again. Arranging the page again at
+        // the new size is the only thing that gives them the right boxes, so it
+        // is done without the loading notice: the panes take a moment to come
+        // back, but nothing is asked of the user.
+        if (!m_ready || m_currentId.isEmpty())
+            return;
+        m_quietReload = true;
+        loadId(m_currentId);
+        m_quietReload = false;
+    });
+
+
     connect(m_view, &QWebEngineView::loadFinished, this, [this](bool ok) {
-        if (!ok && m_loading) {
-            m_loading = false;
-            m_poll->stop();
-            showNotice(QStringLiteral("检索失败"), theme::danger(),
-                       QStringLiteral("页面加载失败"));
+        if (!ok) {
+            if (m_loading) {
+                m_loading = false;
+                m_navigationFailed = true;
+                m_poll->stop();
+                showNotice(QStringLiteral("检索失败"), theme::danger(),
+                           QStringLiteral("页面加载失败"));
+            }
+            return;
+        }
+        // Only now is the document we asked for the one in the view, so now is
+        // the earliest point where `__seexReady` answers for the right page.
+        if (m_loading) {
+            m_pollTicks = 0;
+            m_poll->start();
         }
     });
 
     showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
 }
 
+void PreviewPage::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // The first resizes arrive while the constructor is still building the page.
+    if (!m_resizeReload)
+        return;
+    if (!isVisible()) {
+        // Nothing to rearrange while the tab is hidden; activate() picks it up.
+        m_sizeDirty = true;
+        return;
+    }
+    m_resizeReload->start(kResizeReloadMs);
+}
+
 void PreviewPage::activate()
 {
     const QString id = m_window->state().latestImported();
     if (id.isEmpty()) {
+        ++m_requestToken;
         m_loading = false;
         m_poll->stop();
+        m_resolve->stop();
         m_title->clear();
         showNotice(QStringLiteral("请先在「导入」页导入元件编号，这里会自动预览"), theme::muted());
         return;
     }
-    if (id == m_currentId && (m_ready || m_loading))
+    if (m_sizeDirty) {
+        m_sizeDirty = false;
+        loadId(id);
         return;
-    loadId(id);
+    }
+    if (id != m_currentId) {
+        loadId(id);
+        return;
+    }
+    if (m_ready || m_loading)
+        return;
+    // Same product page, still loaded: only the dialog never arranged itself.
+    // Re-arranging it in place costs one script call, while navigating again
+    // re-downloads the page and tears down the 3D context. Only a navigation
+    // that actually failed has to be repeated.
+    if (m_navigationFailed)
+        loadId(id);
+    else
+        retryInPage();
 }
 
 void PreviewPage::reload()
@@ -363,27 +567,70 @@ void PreviewPage::loadId(const QString &id)
     m_title->setText(id);
     m_loading = true;
     m_pollTicks = 0;
-    showNotice(QStringLiteral("正在加载"), theme::muted());
+    m_navigationFailed = false;
+    // A poll or a lookup left over from the previous page would answer for that
+    // load and could clear m_loading while this one is still resolving.
+    m_poll->stop();
+    m_resolve->stop();
+    // A resize-driven reload keeps the page on screen: the notice would only
+    // flash "正在加载" over content that is about to come back.
+    if (!m_quietReload)
+        showNotice(QStringLiteral("正在加载"), theme::muted());
 
-    LcedaClient client;
-    QString error;
-    const QString url = client.resolveItemPageUrl(id, &error);
-    if (url.isEmpty()) {
-        m_loading = false;
-        showNotice(QStringLiteral("检索失败"), theme::danger(), error);
+    if (const QString cached = m_urlCache.value(id); !cached.isEmpty()) {
+        navigate(cached);
         return;
     }
 
-    // The script has to run in the page's own world, on every frame that loads.
-    QWebEngineScript script;
-    script.setName(QStringLiteral("seex-preview"));
-    script.setSourceCode(QString::fromUtf8(kPreviewScript));
-    script.setInjectionPoint(QWebEngineScript::DocumentReady);
-    script.setWorldId(QWebEngineScript::MainWorld);
-    script.setRunsOnSubFrames(false);
-    m_view->page()->scripts().insert(script);
+    // The page URL comes from the search API, and LcedaClient blocks on a
+    // nested event loop for up to three attempts of 35 seconds. Running that on
+    // the GUI thread froze the tab for the whole round trip, so the lookup goes
+    // to a worker. The answer arrives through a connection bound to this
+    // object, so a destroyed page drops it instead of being called back.
+    const int token = ++m_requestToken;
+    struct ResolveOutcome {
+        QString url;
+        QString error;
+    };
+    auto outcome = std::make_shared<ResolveOutcome>();
+    QThread *worker = QThread::create([id, outcome] {
+        LcedaClient client;
+        outcome->url = client.resolveItemPageUrl(id, &outcome->error);
+    });
+    connect(worker, &QThread::finished, this, [this, worker, token, id, outcome] {
+        worker->deleteLater();
+        if (token != m_requestToken || !m_loading)
+            return;
+        // Only the answer this load is waiting for may stop its watchdog.
+        m_resolve->stop();
+        if (outcome->url.isEmpty()) {
+            m_loading = false;
+            m_navigationFailed = true;
+            showNotice(QStringLiteral("检索失败"), theme::danger(), outcome->error);
+            return;
+        }
+        m_urlCache.insert(id, outcome->url);
+        navigate(outcome->url);
+    });
+    m_resolve->start(kResolveTimeoutMs);
+    worker->start();
+}
 
+void PreviewPage::navigate(const QString &url)
+{
+    // Polling starts from loadFinished instead of here: the document that is
+    // being replaced still reports `__seexReady`, and a poll tick that read it
+    // would declare the new page ready before it had even loaded.
     m_view->setUrl(QUrl(url));
+}
+
+void PreviewPage::retryInPage()
+{
+    m_loading = true;
+    m_pollTicks = 0;
+    showNotice(QStringLiteral("正在加载"), theme::muted());
+    m_view->page()->runJavaScript(
+        QStringLiteral("window.__seexPreviewRetry && window.__seexPreviewRetry()"));
     m_poll->start();
 }
 
@@ -404,7 +651,16 @@ void PreviewPage::pollReady()
                                       m_loading = false;
                                       m_poll->stop();
                                       m_ready = true;
-                                      m_notice->hide();
+                                      // The notice is what hides the browser while it
+                                      // loads; dropping it in the same turn as this
+                                      // poll answer uncovers whatever frame the
+                                      // compositor happens to hold, which on the
+                                      // first open is still empty - that is the
+                                      // flash. Give it one more turn first.
+                                      QTimer::singleShot(120, this, [this] {
+                                          if (m_ready)
+                                              m_notice->hide();
+                                      });
                                   });
 }
 
@@ -417,3 +673,10 @@ void PreviewPage::showNotice(const QString &title, const QColor &color, const QS
 }
 
 } // namespace seex
+
+
+
+
+
+
+
