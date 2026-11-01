@@ -571,8 +571,12 @@ void PreviewPage::placeView()
         m_view->setGeometry(target);
     if (!m_view->isVisible())
         m_view->show();
-    if (onScreen)
+    // Raised only on the way in: this runs ten times a second, and a window
+    // operation per tick for no reason is exactly what makes a browser window
+    // cost more than it should.
+    if (onScreen && !m_onScreen)
         m_view->raise();
+    m_onScreen = onScreen;
 }
 
 void PreviewPage::activate()
