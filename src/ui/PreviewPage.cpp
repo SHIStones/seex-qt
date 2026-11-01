@@ -480,9 +480,7 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
         // back, but nothing is asked of the user.
         if (!m_ready || m_currentId.isEmpty())
             return;
-        m_quietReload = true;
         loadId(m_currentId);
-        m_quietReload = false;
     });
 
 
@@ -576,10 +574,12 @@ void PreviewPage::loadId(const QString &id)
     // load and could clear m_loading while this one is still resolving.
     m_poll->stop();
     m_resolve->stop();
-    // A resize-driven reload keeps the page on screen: the notice would only
-    // flash "正在加载" over content that is about to come back.
-    if (!m_quietReload)
-        showNotice(QStringLiteral("正在加载"), theme::muted());
+    // Nothing is announced while the page arranges itself: the browser keeps the
+    // page invisible until the panes are drawn, so the only thing the user ever
+    // sees is the finished preview. A "正在加载" notice here would just flash
+    // over the card on the way in.
+    m_ready = false;
+    m_notice->hide();
 
     if (const QString cached = m_urlCache.value(id); !cached.isEmpty()) {
         navigate(cached);
@@ -632,7 +632,8 @@ void PreviewPage::retryInPage()
 {
     m_loading = true;
     m_pollTicks = 0;
-    showNotice(QStringLiteral("正在加载"), theme::muted());
+    m_ready = false;
+    m_notice->hide();
     m_view->page()->runJavaScript(
         QStringLiteral("window.__seexPreviewRetry && window.__seexPreviewRetry()"));
     m_poll->start();
@@ -677,6 +678,8 @@ void PreviewPage::showNotice(const QString &title, const QColor &color, const QS
 }
 
 } // namespace seex
+
+
 
 
 

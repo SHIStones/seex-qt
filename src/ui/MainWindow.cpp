@@ -9,6 +9,7 @@
 
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QScreen>
 #include <QLabel>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -30,8 +31,15 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("SeEx: seek and export"));
-    resize(1080, 900);
-    setMinimumSize(1080, 720);
+    // Fit the window to the screen instead of asking for a size the window
+    // manager has to correct: a window that is resized right after it is shown
+    // is drawn twice for a frame, which reads as the whole window flashing on
+    // startup.
+    const QRect available = QGuiApplication::primaryScreen()->availableGeometry();
+    const int startWidth = qMin(1080, available.width() - 40);
+    const int startHeight = qMin(900, available.height() - 40);
+    resize(startWidth, startHeight);
+    setMinimumSize(qMin(1080, startWidth), qMin(720, startHeight));
 
     m_state.applyConfig(AppConfig::load());
 
@@ -72,27 +80,20 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Debug aid: `SEEX_PREVIEW_ID=C2040` starts on the Preview tab with that id
     // already imported, so the preview can be exercised without clicking.
+    // `SEEX_PREVIEW_AFTER_MS=3000` imports the id but opens the tab later, so
+    // the first visit can be observed without driving the mouse.
     const QString seed = qEnvironmentVariable("SEEX_PREVIEW_ID");
     if (!seed.isEmpty()) {
         m_state.importText(seed);
-        applyPage(static_cast<int>(Page::Preview));
-        refreshCounts();
-    } else if (!qEnvironmentVariableIsSet("SEEX_PREVIEW_NOWARMUP")) {
-        // The embedded browser changes the window's surface to OpenGL the first
-        // time it paints, and Qt answers that by recreating the window - which
-        // reads as the whole window blinking when the Preview tab is opened for
-        // the first time. Pay for that first paint now, while the window is
-        // still coming up: the tab is shown for a single turn behind its notice
-        // and switched straight back.
-        QTimer::singleShot(0, this, [this] {
-            const int previous = m_stack->currentIndex();
-            if (previous == static_cast<int>(Page::Preview))
-                return;
-            m_stack->setCurrentIndex(static_cast<int>(Page::Preview));
-            QTimer::singleShot(30, this, [this, previous] {
-                m_stack->setCurrentIndex(previous);
+        const int switchMs = qEnvironmentVariableIntValue("SEEX_PREVIEW_AFTER_MS");
+        if (switchMs > 0) {
+            QTimer::singleShot(switchMs, this, [this] {
+                applyPage(static_cast<int>(Page::Preview));
             });
-        });
+        } else {
+            applyPage(static_cast<int>(Page::Preview));
+        }
+        refreshCounts();
     }
 }
 
@@ -220,3 +221,4 @@ void MainWindow::resizeEvent(QResizeEvent *event)
 }
 
 } // namespace seex
+

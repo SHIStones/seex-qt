@@ -65,10 +65,9 @@ private:
     bool m_navigationFailed = false;
     /// The window was resized while the tab was hidden.
     bool m_sizeDirty = false;
-    /// A reload that must not put the loading notice up.
-    bool m_quietReload = false;
 };
 
 } // namespace seex
+
 
 
