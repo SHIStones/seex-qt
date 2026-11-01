@@ -97,10 +97,12 @@ const char *kPreviewScript = R"JS(
       } catch (error) {
         box = null;
       }
-      const numbers = frame.split(/[\s,]+/).map(Number);
-      const usable = !box || box.width <= 0 || box.height <= 0 ||
+      const numbers = frame.trim().split(/[\s,]+/).map(Number);
+      const measured = numbers.length >= 4 && numbers.every(Number.isFinite);
+      const overlaps = !measured ||
         (box.x < numbers[0] + numbers[2] && box.x + box.width > numbers[0] &&
          box.y < numbers[1] + numbers[3] && box.y + box.height > numbers[1]);
+      const usable = !box || box.width <= 0 || box.height <= 0 || overlaps;
       if (!usable) {
         const size = Math.max(box.width, box.height) * 1.15;
         const centerX = box.x + box.width / 2;
@@ -512,9 +514,15 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // viewer on the browser string: with the stock UA the pane only ever shows
     // the "for reference only" placeholder. Presenting as Edge gets the real
     // viewer, which is what the Rust build (WebView2) was talking to.
+    //
+    // The version matters as much as the name. The site's bot check refuses
+    // browsers it considers old: with the previous `Edg/122` string every
+    // product page came back as `checkbot.html` and then the login page, so the
+    // preview showed nothing at all. `Edg/140` loads the page. Keep this string
+    // in step with a current browser, or the preview will look broken again.
     m_profile->setHttpUserAgent(
         QStringLiteral("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0"));
+                       "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0"));
 
     auto *page = new QWebEnginePage(m_profile, m_view);
     m_view->setPage(page);
@@ -590,6 +598,22 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
                 m_poll->stop();
                 showNotice(QStringLiteral("检索失败"), theme::danger(),
                            QStringLiteral("页面加载失败"));
+            }
+            return;
+        }
+        // The site answers a client it does not trust - which includes a client
+        // that has asked for too much in a short window - with its bot check and
+        // then the login page, instead of the product page. Saying so beats an
+        // empty card that looks like a broken app.
+        const QString landed = m_view->url().toString();
+        if (landed.contains(QStringLiteral("checkbot"))
+            || landed.contains(QStringLiteral("passport.jlc.com"))) {
+            if (m_loading) {
+                m_loading = false;
+                m_navigationFailed = true;
+                m_poll->stop();
+                showNotice(QStringLiteral("网站要求验证"), theme::danger(),
+                           QStringLiteral("立创商城暂时要求人机验证，过一会儿再点刷新"));
             }
             return;
         }
