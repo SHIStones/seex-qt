@@ -442,6 +442,20 @@ PreviewPage::PreviewPage(MainWindow *window, QWidget *parent)
     // The script has to run in the page's own world, on every frame that loads.
     // Inserted once, not per load: the collection appends whatever it is given,
     // so inserting it again on each refresh stacked another copy of the script.
+    //
+    // A second, tiny script runs before the document is parsed. That is the only
+    // point early enough to hide the page: at document-ready the browser has
+    // already painted the raw product page, and that paint is what shows through
+    // for a frame on every reload - and a window resize reloads on purpose.
+    QWebEngineScript hideScript;
+    hideScript.setName(QStringLiteral("seex-preview-hide"));
+    hideScript.setSourceCode(QStringLiteral(
+        "try { document.documentElement.style.opacity = '0'; } catch (e) {}"));
+    hideScript.setInjectionPoint(QWebEngineScript::DocumentCreation);
+    hideScript.setWorldId(QWebEngineScript::MainWorld);
+    hideScript.setRunsOnSubFrames(false);
+    page->scripts().insert(hideScript);
+
     QWebEngineScript script;
     script.setName(QStringLiteral("seex-preview"));
     script.setSourceCode(QString::fromUtf8(kPreviewScript));
